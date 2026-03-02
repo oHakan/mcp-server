@@ -11,4 +11,6 @@ import (
 func Register(s *mcpserver.MCPServer, logger *log.Logger) {
 	registerAnalyzeTool(s, logger)
 	registerPlanTool(s, logger)
+	registerExecuteTool(s, logger)
+	registerReportTool(s, logger)
 }

@@ -52,7 +52,7 @@ func registerPlanTool(s *mcpserver.MCPServer, logger *log.Logger) {
 
 		logger.Printf("create_plan çağrıldı: prompt=%q project=%q", prompt, projectPath)
 
-		projCtx, _ := aicontext.Load(projectPath)
+		projCtx := aicontext.Load(projectPath, logger)
 		output, err := planner.Generate(planner.PlanInput{
 			Prompt:      prompt,
 			Answers:     answers,
