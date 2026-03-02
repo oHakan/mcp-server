@@ -3,31 +3,25 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"ohakan-mcp/aicontext"
-	"ohakan-mcp/planner"
 )
 
 type analyzeResponse struct {
-	ContextSummary string             `json:"context_summary"`
-	MissingContext []string           `json:"missing_context"`
-	Questions      []questionResponse `json:"questions"`
-	Instruction    string             `json:"instruction"`
-}
-
-type questionResponse struct {
-	Category string `json:"category"`
-	Text     string `json:"text"`
-	Why      string `json:"why"`
+	ContextSummary      string   `json:"context_summary"`
+	MissingContext      []string `json:"missing_context"`
+	AnalysisInstruction string   `json:"analysis_instruction"`
 }
 
 func registerAnalyzeTool(s *mcpserver.MCPServer, logger *log.Logger) {
 	tool := mcp.NewTool("analyze_task",
-		mcp.WithDescription("Görevi analiz eder, proje bağlamını okur ve çağıran AI'ın kullanıcıya sorması gereken soruları döner."),
+		mcp.WithDescription("Proje bağlamını okur ve çağıran AI'ın görevi kendi zekasıyla analiz edip kullanıcıya özgün sorular sorması için zengin bir talimat döner."),
 		mcp.WithString("prompt",
 			mcp.Required(),
 			mcp.Description("Yapılacak görevin açıklaması"),
@@ -51,22 +45,11 @@ func registerAnalyzeTool(s *mcpserver.MCPServer, logger *log.Logger) {
 		logger.Printf("analyze_task çağrıldı: prompt=%q project=%q", prompt, projectPath)
 
 		projCtx, _ := aicontext.Load(projectPath)
-		questions := planner.GenerateQuestions(prompt, projCtx)
-
-		qResponses := make([]questionResponse, 0, len(questions))
-		for _, q := range questions {
-			qResponses = append(qResponses, questionResponse{
-				Category: q.Category,
-				Text:     q.Text,
-				Why:      q.Why,
-			})
-		}
 
 		resp := analyzeResponse{
-			ContextSummary: projCtx.Summary(),
-			MissingContext: projCtx.MissingFiles,
-			Questions:      qResponses,
-			Instruction:    "Lütfen bu soruları kullanıcıya sorun, ardından create_plan'ı çağırın.",
+			ContextSummary:      projCtx.Summary(),
+			MissingContext:      projCtx.MissingFiles,
+			AnalysisInstruction: buildAnalysisInstruction(prompt, projectPath, projCtx),
 		}
 
 		data, err := json.MarshalIndent(resp, "", "  ")
@@ -76,4 +59,79 @@ func registerAnalyzeTool(s *mcpserver.MCPServer, logger *log.Logger) {
 
 		return mcp.NewToolResultText(string(data)), nil
 	})
+}
+
+// buildAnalysisInstruction çağıran AI'ın (Claude Code / Cursor) görevi derinlemesine
+// analiz edip kullanıcıya özgün sorular sorması için gereken tüm bağlamı ve talimatları
+// içeren bir prompt döner. Soru üretme işi çağıran AI'a devredilir.
+func buildAnalysisInstruction(prompt, projectPath string, ctx *aicontext.ProjectContext) string {
+	var b strings.Builder
+
+	b.WriteString("## Görevin\n\n")
+	b.WriteString("Sen bir kıdemli yazılım mimarısın. ")
+	b.WriteString("Aşağıdaki görevi derinlemesine analiz et, ")
+	b.WriteString("geliştiricinin cevaplamadan sağlıklı bir plan yapılamayacağı **5-8 kritik soru** üret. ")
+	b.WriteString("Bu soruları kullanıcıya sor, cevapları aldıktan sonra `create_plan` tool'unu çağır.\n\n")
+
+	b.WriteString("---\n\n")
+	b.WriteString("## Yapılacak Görev\n\n")
+	b.WriteString(prompt)
+	b.WriteString("\n\n---\n\n")
+
+	b.WriteString("## Proje Bağlamı\n\n")
+
+	if ctx.Stack != "" {
+		b.WriteString("### Teknoloji Yığını\n")
+		b.WriteString(ctx.Stack)
+		b.WriteString("\n\n")
+	}
+
+	if ctx.Architecture != "" {
+		b.WriteString("### Mimari\n")
+		b.WriteString(ctx.Architecture)
+		b.WriteString("\n\n")
+	}
+
+	if ctx.Standards != "" {
+		b.WriteString("### Kodlama Standartları\n")
+		b.WriteString(ctx.Standards)
+		b.WriteString("\n\n")
+	}
+
+	if ctx.Context != "" {
+		b.WriteString("### Genel Bağlam\n")
+		b.WriteString(ctx.Context)
+		b.WriteString("\n\n")
+	}
+
+	if len(ctx.MissingFiles) > 0 {
+		b.WriteString("### Eksik Context Dosyaları\n")
+		b.WriteString("Aşağıdaki dosyalar bulunamadı — bu alanlardaki bilgiler sorularınla öğrenilmeli:\n")
+		for _, f := range ctx.MissingFiles {
+			b.WriteString("- `" + f + "`\n")
+		}
+		b.WriteString("\n")
+	}
+
+	if ctx.PlanCount > 0 {
+		fmt.Fprintf(&b, "*Bu projede daha önce %d plan oluşturulmuş.*\n\n", ctx.PlanCount)
+	}
+
+	b.WriteString("---\n\n")
+	b.WriteString("## Soru Üretme Kuralları\n\n")
+	b.WriteString("- **Bu göreve özgü** sorular üret — genel/yüzeysel sorulardan kaçın\n")
+	b.WriteString("- **Kapsam**: neyin dahil, neyin hariç olduğunu netleştir\n")
+	b.WriteString("- **Teknik derinlik**: interface tasarımı, pattern seçimi, veri modeli, hata yönetimi gibi implementation kararlarını sor\n")
+	b.WriteString("- **Risk & edge case**: görevin riskli veya belirsiz yönlerini hedefle\n")
+	b.WriteString("- **Başarı kriterleri**: görev ne zaman tamamlanmış sayılır?\n")
+	b.WriteString("- Bağlamda zaten cevabı olan konuları **sorma**\n\n")
+
+	b.WriteString("---\n\n")
+	b.WriteString("## Sonraki Adım\n\n")
+	b.WriteString("Soruları kullanıcıya sorduktan ve cevapları aldıktan sonra `create_plan` tool'unu şu parametrelerle çağır:\n")
+	fmt.Fprintf(&b, "- `prompt`: \"%s\"\n", prompt)
+	fmt.Fprintf(&b, "- `project_path`: \"%s\"\n", projectPath)
+	b.WriteString("- `answers`: kullanıcının tüm cevapları (birleştirilmiş metin)\n")
+
+	return b.String()
 }
